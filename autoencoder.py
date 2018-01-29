@@ -4,39 +4,43 @@ import tensorflow as tf
 import ctypes as ct
 import numpy as np
 import argparse,os,shutil,sys
-try:
-    from StringIO import StringIO
-except ImportError:
-    from io import StringIO
-    
+from io import StringIO
 #dataset
 class Dataset:
     def __init__(self, path, mean):
-        self.images=[]
+        self.images=[[],[]]
         self.index=0
-        for file in os.listdir(path):
+        for file in os.listdir(path+'/1'):
             print('Reading: %s'%file)
-            self.images.append(np.array(Image.open(path+'/'+file)))
+            self.images[0].append(np.array(Image.open(path+'/1/'+file)))
+            self.images[1].append(np.array(Image.open(path+'/2/'+file)))
             if mean:
                 if not hasattr(self,'mean'):
-                    self.mean=self.images[-1]
-                else: self.mean+=self.images[-1]
+                    self.mean=[self.images[0][-1],self.images[1][-1]]
+                else: 
+                    for d in range(len(self.images)):
+                        self.mean[d]+=self.images[d][-1]
         if mean:
-            self.mean=np.divide(self.mean,float(len(self.images)))
-            for image in self.images:
-                image=np.subtract(image,self.mean)
+            for d in range(len(self.images)):
+                self.mean[d]=np.divide(self.mean[d],float(len(self.images[d])))
+                for image in self.images[d]:
+                    image=np.subtract(image,self.mean[d])
         print('%d datums read!'%self.nrDatums())
     def nrDatums(self):
-        return len(self.images)
+        return len(self.images[0])
     def nextBatch(self, sz, random):
+        ret=[]
         if random:
             arr=np.random.choice(self.nrDatums(),sz)
-            return [self.images[i] for i in arr]
+            for d in range(len(self.images)):
+                ret.append([self.images[d][i] for i in arr])
         else:
             id=self.index
             nr=self.nrDatums()
             self.index+=sz
-            return [self.images[(i+id)%nr] for i in range(sz)]
+            for d in range(len(self.images)):
+                ret.append([self.images[d][(i+id)%nr] for i in range(sz)])
+        return ret
     def nrEpoch(self):
         return self.index/self.nrDatums()
     def reset(self):
@@ -81,7 +85,7 @@ def get_parser(model_default):
     parser.add_argument('--batch_size',metavar='[batch size]',action='store',type=int,choices=range(1,1000),default=64)
     parser.add_argument('--iter_per_patch',metavar='[how many iterations to run per batch]',action='store',type=int,choices=range(1,100),default=1)
     parser.add_argument('--keep_prob',metavar='[dropout rate]',action='store',type=float,default=0.9)
-    parser.add_argument('--from_stepsize',metavar='[starting stepsize]',action='store',type=float,default=1e-4)
+    parser.add_argument('--from_stepsize',metavar='[starting stepsize]',action='store',type=float,default=1e-3)
     parser.add_argument('--to_stepsize',metavar='[ending stepsize]',action='store',type=float,default=1e-6)
     parser.add_argument('--mean_file', dest='mean_file', action='store_true')
     parser.add_argument('--no_mean_file', dest='mean_file', action='store_false')
@@ -135,13 +139,14 @@ def encoder(results, image, keep, nrk=[32,64,128, 128,128], resize=[128,128]):
         df2=tf.nn.dropout(f2,keep)
     if results.debug_shape:
         print(h1.shape, h2.shape, h3.shape, h3Flat.shape, f1.shape, f2.shape)
-    return imresize,df2,h3Shape,sprod
-def decoder(results, image, feat, h3Shape, sprod, nrk=[32,64,128, 128,128], resize=[128,128]):
+    return imresize,df2,h3Shape
+def decoder(results, image, feat, h3Shape, nrk=[32,64,128, 128,128], resize=[128,128]):
     with tf.variable_scope('fc2',reuse=tf.AUTO_REUSE):
         W=weight_variable([nrk[3],nrk[4]])
         b=bias_variable([nrk[4]])
         f2=tf.nn.relu(tf.matmul(feat,W)+b)
     with tf.variable_scope('fc1',reuse=tf.AUTO_REUSE):
+        sprod=h3Shape[1]*h3Shape[2]*h3Shape[3]
         W=weight_variable([nrk[3],sprod])
         b=bias_variable([sprod])
         f1=tf.nn.relu(tf.matmul(f2,W)+b)
@@ -162,23 +167,36 @@ def decoder(results, image, feat, h3Shape, sprod, nrk=[32,64,128, 128,128], resi
         print(f2.shape, h3.shape, h2.shape, h1.shape, imagePred.shape)
     return imagePred
 def autoencoder_create(results,img):
-    image=tf.placeholder(tf.float32,[None,img.shape[0],img.shape[1],img.shape[2]],name='image')
+    image1=tf.placeholder(tf.float32,[None,img.shape[0],img.shape[1],img.shape[2]],name='image')
+    image2=tf.placeholder(tf.float32,[None,img.shape[0],img.shape[1],img.shape[2]],name='image')
     keep=tf.placeholder(tf.float32,name='keepProb')
     with tf.variable_scope('encoder',reuse=tf.AUTO_REUSE):
-        imresize,feat,h3Shape,sprod=encoder(results,image,keep)
-    with tf.variable_scope('decoder',reuse=tf.AUTO_REUSE):
-        imagePred=decoder(results,image,feat,h3Shape,sprod)
-    return image,imresize,feat,imagePred,keep
-def autoencoder_create_trainer(results, image, imagePred):
+        imresize1,feat1,h3Shape=encoder(results,image1,keep)
+        imresize2,feat2,h3Shape2=encoder(results,image2,keep)
+    with tf.variable_scope('decoder1',reuse=tf.AUTO_REUSE):
+        imagePred11=decoder(results,image1,feat1,h3Shape)
+        imagePred21=decoder(results,image2,feat2,h3Shape)
+    with tf.variable_scope('decoder2',reuse=tf.AUTO_REUSE):
+        imagePred12=decoder(results,image1,feat1,h3Shape)
+        imagePred22=decoder(results,image2,feat2,h3Shape)
+    return  image1,image2,imresize1,imresize2,  \
+            imagePred11,imagePred12,imagePred21,imagePred22,    \
+            feat1,feat2,keep
+def autoencoder_create_trainer(results, imresize1,imresize2, imagePred11,imagePred12,imagePred21,imagePred22):
     with tf.variable_scope('loss',reuse=tf.AUTO_REUSE):
-        eucLoss=tf.nn.l2_loss(image-imagePred)
+        eucLoss=tf.nn.l2_loss(imresize1-imagePred11)+  \
+                tf.nn.l2_loss(imresize2-imagePred12)+  \
+                tf.nn.l2_loss(imresize1-imagePred21)+  \
+                tf.nn.l2_loss(imresize2-imagePred22)
     trainStep,learning_rate,global_step=create_trainer(results,eucLoss,results.from_stepsize,results.to_stepsize)
     return trainStep,learning_rate,global_step,eucLoss
 #parameters
 def autoencoder_train(results, sess):
     ds=Dataset(results.dataset_path,results.mean_file)
-    image,imresize,feat,imagePred,keep=autoencoder_create(results,ds.images[0])
-    trainStep,learning_rate,global_step,eucLoss=autoencoder_create_trainer(results,imresize,imagePred)
+    image1,image2,imresize1,imresize2,  \
+    imagePred11,imagePred12,imagePred21,imagePred22,    \
+    feat1,feat2,keep=autoencoder_create(results,ds.images[0][0])
+    trainStep,learning_rate,global_step,eucLoss=autoencoder_create_trainer(results,imresize1,imresize2,imagePred11,imagePred12,imagePred21,imagePred22)
     #saver
     saver=tf.train.Saver()
     if not os.path.exists(results.model_path):
@@ -192,10 +210,10 @@ def autoencoder_train(results, sess):
         while ds.nrEpoch() == 0:
             images=ds.nextBatch(results.batch_size,False)
             for i_per_batch in range(results.iter_per_patch):
-                trainStep.run(feed_dict={keep:results.keep_prob,global_step:i,image:images})
+                trainStep.run(feed_dict={keep:results.keep_prob,global_step:i,image1:images[0],image2:images[1]})
         #test result
         rate=learning_rate.eval(feed_dict={global_step:i})
-        loss=eucLoss.eval(feed_dict={keep:1,image:ds.images})
+        loss=eucLoss.eval(feed_dict={keep:1,image1:ds.images[0],image2:ds.images[1]})
         print('Epoch %d, rate: %f, loss: %f'%(i,rate,loss))
         #write/profile
         if i%results.save_interval == 0:
